@@ -39,6 +39,14 @@ def test_wrap_deg_hard_coded(angle, expected):
     assert wrap_deg(angle) == expected
 
 
+def test_wrap_deg_array():
+    angles = np.array([-180.0, 180.0, 270.0, 0.0, 360.0, 190.0, -190.0, 540.0])
+    expected = np.array([180.0, 180.0, -90.0, 0.0, 0.0, -170.0, 170.0, 180.0])
+    out = wrap_deg(angles)
+    assert isinstance(out, np.ndarray)
+    assert np.array_equal(out, expected)
+
+
 @pytest.mark.parametrize("estimate, truth, expected", [(-179, 179, 2), (179, -179, -2)])
 def test_signed_circular_error(estimate, truth, expected):
     assert circular_error_deg(estimate, truth) == expected
@@ -63,6 +71,30 @@ def test_sign_independent_of_make_signals():
     assert abs(circular_error_deg(est, 90.0)) <= TOL_DEG
 
 
+@pytest.mark.parametrize("amplitude", [1e152, 1e160])
+@pytest.mark.parametrize("true_deg", [30.0, -120.0])
+def test_regression_large_amplitude_no_overflow(amplitude, true_deg):
+    # Regression (review #1): angle(z_y * conj(z_x)) overflowed, giving nan at
+    # 1e160 and wrong finite values (45, -135) at 1e152.
+    _, x, y = make_signals(F, FS, T, amplitude, true_deg, sigma=0.0)
+    est = estimate_phase_difference(x, y, F, FS)
+    assert abs(circular_error_deg(est, true_deg)) <= TOL_DEG
+
+
+@pytest.mark.parametrize("dc", [1e10, 1e11])
+def test_large_dc_offset_accepted_after_mean_removal(dc):
+    # Review #2: before mean removal these were rejected as "undefined".
+    # Tolerance is a rounding bound, not 1e-8: storing dc + cos and removing
+    # the mean perturbs each sample by up to ~1 ulp(dc), so |dZ| <= N*ulp and
+    # each phase moves by <= 2*ulp/A rad; the difference by <= 4*ulp/A rad.
+    t = np.arange(int(FS * T)) / FS
+    x = dc + A * np.cos(2 * np.pi * F * t)
+    y = dc + A * np.cos(2 * np.pi * F * t + np.deg2rad(45.0))
+    tol_deg = math.degrees(4 * np.spacing(dc) / A)
+    est = estimate_phase_difference(x, y, F, FS)
+    assert abs(circular_error_deg(est, 45.0)) <= tol_deg
+
+
 @pytest.mark.parametrize("a, b", [(270.0, -90.0), (190.0, -170.0), (180.0, -180.0)])
 def test_wrap_equivalent_inputs(a, b):
     est_a, est_b = noiseless_estimate(a), noiseless_estimate(b)
@@ -74,19 +106,30 @@ def test_wrap_equivalent_inputs(a, b):
 # ---------------------------------------------------------------- rejections
 
 
-def test_rejects_zero_signal():
+@pytest.mark.parametrize("side", ["x", "y"])
+def test_rejects_zero_signal(side):
+    _, sig, _ = make_signals(F, FS, T, A, 0.0, sigma=0.0)
+    args = (np.zeros_like(sig), sig) if side == "x" else (sig, np.zeros_like(sig))
+    with pytest.raises(ValueError, match=f"phase of {side} is undefined"):
+        estimate_phase_difference(*args, F, FS)
+
+
+def test_rejects_constant_signal():
+    # A pure DC signal has no component at f once its mean is removed.
     _, x, _ = make_signals(F, FS, T, A, 0.0, sigma=0.0)
-    with pytest.raises(ValueError, match="undefined"):
-        estimate_phase_difference(x, np.zeros_like(x), F, FS)
+    with pytest.raises(ValueError, match="phase of y is undefined"):
+        estimate_phase_difference(x, np.full_like(x, 5.0), F, FS)
 
 
-def test_rejects_signal_with_no_component_at_f():
+@pytest.mark.parametrize("side", ["x", "y"])
+def test_rejects_signal_with_no_component_at_f(side):
     # Scale-aware check: a pure 2f sinusoid projects to ~0 at f.
     t = np.arange(int(FS * T)) / FS
-    x = np.cos(2 * np.pi * F * t)
-    y = np.cos(2 * np.pi * 2 * F * t)
-    with pytest.raises(ValueError, match="undefined"):
-        estimate_phase_difference(x, y, F, FS)
+    at_f = np.cos(2 * np.pi * F * t)
+    at_2f = np.cos(2 * np.pi * 2 * F * t)
+    args = (at_2f, at_f) if side == "x" else (at_f, at_2f)
+    with pytest.raises(ValueError, match=f"phase of {side} is undefined"):
+        estimate_phase_difference(*args, F, FS)
 
 
 def test_rejects_non_integer_sample_count():
@@ -143,11 +186,36 @@ def test_rejects_bad_parameters(kwargs, match):
         make_signals(**params)
 
 
-def test_rejects_non_finite_signal_values():
+@pytest.mark.parametrize("side", ["x", "y"])
+@pytest.mark.parametrize("bad", [np.nan, np.inf])
+def test_rejects_non_finite_signal_values(side, bad):
     _, x, y = make_signals(F, FS, T, A, 0.0, sigma=0.0)
-    x[5] = np.nan
-    with pytest.raises(ValueError, match="non-finite"):
+    (x if side == "x" else y)[5] = bad
+    with pytest.raises(ValueError, match=f"{side} contains non-finite"):
         estimate_phase_difference(x, y, F, FS)
+
+
+def test_rejects_2d_signal():
+    _, x, y = make_signals(F, FS, T, A, 0.0, sigma=0.0)
+    with pytest.raises(ValueError, match="1-D"):
+        estimate_phase_difference(x.reshape(2, -1), y.reshape(2, -1), F, FS)
+
+
+@pytest.mark.parametrize(
+    "f, fs, match",
+    [
+        (0.0, FS, "0 < f < fs/2"),
+        (FS / 2, FS, "0 < f < fs/2"),
+        (F, 0.0, "fs must be > 0"),
+        (F, -FS, "fs must be > 0"),
+        (10.25, FS, "not an integer"),
+        (math.nan, FS, "finite"),
+    ],
+)
+def test_estimator_rejects_bad_frequency_or_fs_directly(f, fs, match):
+    _, x, y = make_signals(F, FS, T, A, 0.0, sigma=0.0)
+    with pytest.raises(ValueError, match=match):
+        estimate_phase_difference(x, y, f, fs)
 
 
 def test_rejects_mismatched_lengths():
@@ -171,9 +239,11 @@ def test_seeded_noisy_example_reproducible_and_broadly_accurate():
     t2, x2, y2 = make_signals(F, FS, T, A, true_deg, sigma=sigma, seed=0)
     # Reproducibility: exact equality, claimed only within the same environment.
     assert np.array_equal(x1, x2) and np.array_equal(y1, y2)
-    # Separate noise draws for x and y from one generator.
-    assert not np.array_equal(x1 - A * np.cos(2 * np.pi * F * t1),
-                              y1 - A * np.cos(2 * np.pi * F * t1 + np.deg2rad(true_deg)))
+    # Noise for x and y is the first and second draw from one generator.
+    rng = np.random.default_rng(0)
+    noise_x, noise_y = rng.standard_normal(t1.size), rng.standard_normal(t1.size)
+    assert np.array_equal(x1, A * np.cos(2 * np.pi * F * t1) + sigma * noise_x)
+    assert np.array_equal(y1, A * np.cos(2 * np.pi * F * t1 + np.deg2rad(true_deg)) + sigma * noise_y)
     est1 = estimate_phase_difference(x1, y1, F, FS)
     est2 = estimate_phase_difference(x2, y2, F, FS)
     assert est1 == est2

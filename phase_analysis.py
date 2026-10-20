@@ -1,9 +1,10 @@
 """Phase difference between two synthetic same-frequency sinusoids.
 
-Method: coherent complex projection at a known frequency f. Each signal is
-projected onto exp(-i 2 pi f t) over the whole record, giving one complex
-coefficient per signal; the angle of Z_y * conj(Z_x) is a single, record-wide
-phase-difference estimate. No time-resolved phase is computed.
+Method: coherent complex projection at a known frequency f. Each signal has
+its record mean subtracted and is then projected onto exp(-i 2 pi f t) over
+the whole record, giving one complex coefficient per signal; the wrapped
+difference angle(Z_y) - angle(Z_x) is a single, record-wide phase-difference
+estimate. No time-resolved phase is computed.
 
 Conventions
 -----------
@@ -21,8 +22,8 @@ import numpy as np
 
 # Chosen numerical guards (not universal error guarantees).
 # INTEGER_TOL: how close fs*T and f*N/fs must be to an integer to be accepted.
-# PROJECTION_RTOL: |Z| <= PROJECTION_RTOL * sum(|x|) is treated as "no
-# measurable component at f", so the phase is undefined and we raise.
+# PROJECTION_RTOL: |Z| <= PROJECTION_RTOL * sum(|x - mean(x)|) is treated as
+# "no measurable component at f", so the phase is undefined and we raise.
 INTEGER_TOL = 1e-9
 PROJECTION_RTOL = 1e-10
 
@@ -154,13 +155,17 @@ def make_signals(frequency, fs, duration, amplitude, phase_diff_deg, sigma, seed
 
 
 def _projection(name, signal, frequency, fs):
+    # Subtract the record mean first. Over an integer number of cycles the
+    # mean contributes nothing to Z in exact arithmetic; removing it keeps a
+    # large DC offset from dominating rounding error and the threshold below.
+    signal = signal - np.mean(signal)
     t = np.arange(signal.size) / fs
     z = np.sum(signal * np.exp(-2j * np.pi * frequency * t))
     scale = np.sum(np.abs(signal))
     if scale == 0.0 or abs(z) <= PROJECTION_RTOL * scale:
         raise ValueError(
             f"phase of {name} is undefined: projection at f is zero or negligible "
-            f"(|Z| = {abs(z):.3g}, sum|{name}| = {scale:.3g})"
+            f"(|Z| = {abs(z):.3g}, sum|{name} - mean| = {scale:.3g})"
         )
     return z
 
@@ -169,7 +174,8 @@ def estimate_phase_difference(x, y, frequency, fs):
     """Record-wide phase difference phi_y - phi_x (degrees, in (-180, 180]).
 
     Uses coherent complex projection at the known frequency over the whole
-    record, sampled at t[n] = n / fs. Requires an integer number of cycles.
+    record, sampled at t[n] = n / fs, after subtracting each signal's record
+    mean. Requires an integer number of cycles.
     """
     frequency = _finite_scalar("frequency", frequency)
     fs = _finite_scalar("fs", fs)
@@ -186,7 +192,9 @@ def estimate_phase_difference(x, y, frequency, fs):
 
     z_x = _projection("x", x, frequency, fs)
     z_y = _projection("y", y, frequency, fs)
-    return wrap_deg(np.rad2deg(np.angle(z_y * np.conj(z_x))))
+    # Difference of angles rather than angle(z_y * conj(z_x)): the product
+    # overflows for very large signals and can return nan or a wrong value.
+    return wrap_deg(np.rad2deg(np.angle(z_y)) - np.rad2deg(np.angle(z_x)))
 
 
 # ---------------------------------------------------------------- reporting
@@ -204,8 +212,8 @@ def predicted_std_deg(amplitude, sigma, n):
     return math.degrees(2.0 * sigma / (amplitude * math.sqrt(n)))
 
 
-def plot_signals(t, x, y, frequency, true_deg, est_deg, err_deg, path, n_cycles=3):
-    """Save a plot of the first few cycles of both signals."""
+def plot_signals(t, x, y, frequency, amplitude, true_deg, est_deg, err_deg, path, n_cycles=3):
+    """Save a plot of the first few cycles of both signals, with noiseless references."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -213,8 +221,13 @@ def plot_signals(t, x, y, frequency, true_deg, est_deg, err_deg, path, n_cycles=
 
     show = t < n_cycles / frequency
     fig, ax = plt.subplots(figsize=(8, 4), dpi=120)
-    ax.plot(t[show], x[show], color="#2a78d6", linewidth=1.0, label="x (reference)")
-    ax.plot(t[show], y[show], color="#eb6834", linewidth=1.0, label="y")
+    ts = t[show]
+    clean_x = amplitude * np.cos(2 * np.pi * frequency * ts)
+    clean_y = amplitude * np.cos(2 * np.pi * frequency * ts + np.deg2rad(true_deg))
+    ax.plot(ts, x[show], color="#2a78d6", linewidth=0.8, alpha=0.4, label="x (reference), noisy")
+    ax.plot(ts, y[show], color="#eb6834", linewidth=0.8, alpha=0.4, label="y, noisy")
+    ax.plot(ts, clean_x, color="#2a78d6", linewidth=2.0, linestyle="--", label="x, noiseless")
+    ax.plot(ts, clean_y, color="#eb6834", linewidth=2.0, linestyle="--", label="y, noiseless (true Δ)")
     ax.set_xlabel("time (s)")
     ax.set_ylabel("amplitude")
     ax.set_title(
@@ -224,7 +237,7 @@ def plot_signals(t, x, y, frequency, true_deg, est_deg, err_deg, path, n_cycles=
     ax.grid(True, color="#e0e0e0", linewidth=0.6)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=2, frameon=False, fontsize=9)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.2), ncol=4, frameon=False, fontsize=8)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
@@ -245,7 +258,7 @@ def main(path="phase_demo.png"):
     print(f"SNR = A^2 / (2 sigma^2):           {snr(p['amplitude'], p['sigma']):.3f}")
     print(f"Small-error approx. std of est.:   {predicted_std_deg(p['amplitude'], p['sigma'], t.size):.3f} deg")
 
-    plot_signals(t, x, y, p["frequency"], true_wrapped, est, err, path)
+    plot_signals(t, x, y, p["frequency"], p["amplitude"], true_wrapped, est, err, path)
     print(f"Plot written to {path}")
 
 
