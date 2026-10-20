@@ -19,6 +19,10 @@ compared with the known value, and plotted. Synthetic data only.
 - Sample times: `t[n] = n / fs`, `n = 0, ..., N-1` (endpoint `T` excluded).
 - Signals: `x = A cos(2πft) + σ·noise_x`, `y = A cos(2πft + Δ) + σ·noise_y`.
   One random generator per call; `noise_x` is drawn first, then `noise_y`.
+- Scaling: each signal is first multiplied by an exact power of two so its
+  peak is ≤ 1. Phase does not depend on scale and this scaling is exact, so
+  it changes no result; it prevents overflow for amplitudes up to the
+  float64 maximum (tested at 1e306, 1e307 and 1.7e308).
 - Mean removal: each signal's record mean is subtracted before projection.
   Over an integer number of cycles the mean contributes nothing to `Z` in
   exact arithmetic, so this does not change the estimate for a sinusoid; it
@@ -60,6 +64,11 @@ Estimates near ±180° may land on either side of the boundary by rounding
 (true +180° can return −179.99999999999991). Compare such values with the
 circular error, not by raw value.
 
+`wrap_deg` uses an exact remainder, so for any finite input its output is
+in (−180, 180] and exactly congruent to the input mod 360 (an earlier
+formula could leave that range by rounding). Non-finite input (`inf`,
+`−inf`, `nan`) returns `nan`.
+
 ## Tests
 
 - Deterministic (noiseless) cases use a 1e-8° absolute circular-error
@@ -68,10 +77,14 @@ circular error, not by raw value.
   190/−170, 180/−180). This tolerance applies to these cases, not to every
   accepted input.
 - `wrap_deg` (scalar and array) and signed circular error against
-  hard-coded values. `wrap_deg` of a non-finite value returns `nan`; this is
-  not tested.
+  hard-coded values; `wrap_deg(inf / −inf / nan)` returns `nan`.
+- Regression tests for `wrap_deg` range and exact congruence at values that
+  previously left (−180, 180] (e.g. −179.99999999999997 → 180.00000000000003,
+  inputs near 1e17, ±1.7e308).
 - Regression tests for overflow at very large amplitude (1e152, 1e160), which
-  previously returned `nan` or wrong finite values.
+  previously returned `nan` or wrong finite values, and at the float64 limit
+  (1e306, 1e307, 1.7e308), which previously raised a misleading "undefined"
+  error or returned `nan`; these run with floating-point errors raised.
 - Large DC offsets (1e10, 1e11) are accepted and accurate within a derived
   rounding bound of `4·ulp(DC)/A` rad.
 - Rejection tests: zero, constant, and no-component-at-f signals (x and y
@@ -97,11 +110,34 @@ python3 -m venv .venv
 Default demonstration: f = 10 Hz, fs = 1000 Hz, T = 2 s (N = 2000, k = 20),
 A = 1, Δ = +45°, σ = 0.5 (SNR = 2), seed 0.
 
-## Recorded environment
+## Multi-seed check (recorded result, not a test)
 
-Versions observed in the project `.venv` where the tests and demonstration
-were run: Python 3.13.16 (Linux x86_64, glibc 2.39), numpy 2.5.4,
-matplotlib 3.11.2, pytest 9.1.1. Full list in `requirements.txt`.
+A one-off measurement, separate from the automated tests, using the default
+settings (true Δ = +45°, σ = 0.5, N = 2000) and seeds 0–399, run in the
+project `.venv`:
+
+| Quantity | Value |
+|---|---|
+| Mean signed error | +0.0082° |
+| Standard error of the mean | 0.0623° |
+| Approximate 95% CI (mean ± 1.96 SE) | [−0.114°, +0.130°] |
+| SD of errors | 1.245° (small-error prediction 1.281°) |
+| Seeds with \|error\| ≥ 2.772° (seed 0's error) | 3.0% |
+
+No bias was detected at this resolution (about ±0.12°). This does not prove
+the estimator is unbiased, and it covers only these settings. The
+single-seed noisy test remains a limited check.
+
+## Recorded environments
+
+| Environment | Python | numpy | Role |
+|---|---|---|---|
+| Project `.venv` (this container) | 3.13.16 | **2.5.4** | Runs all tests and the demonstration; `requirements.txt` is frozen from it |
+| Container system `python3` | 3.13.16 | 2.5.3 | Not used for tests or results |
+| Independent reviewer's environment | not recorded | 2.5.3 (as reported in the review) | Reproduced the demo result (+47.7723°); not verified here |
+
+`.venv` also has matplotlib 3.11.2 and pytest 9.1.1 (Linux x86_64,
+glibc 2.39). Full list in `requirements.txt`.
 
 ## Limitations
 
@@ -109,8 +145,8 @@ matplotlib 3.11.2, pytest 9.1.1. Full list in `requirements.txt`.
   phase relationship is constant across the record.
 - Requires an integer number of cycles in the record; no windowing.
 - Noise model: independent white Gaussian noise, equal σ in both signals.
-- No Monte Carlo characterization of noise performance or bias yet
-  (deferred). The default seed's +2.77° error is about 2.2 × the
-  approximate std.
+- Bias and noise performance were checked only once, at the default
+  settings over 400 seeds (see above); no larger simulation was run. The
+  default seed's +2.77° error is about 2.2 × the approximate std.
 - The plot shows three noisy cycles with the noiseless signals overlaid
   (dashed) so the offset is visible; it is illustrative only.

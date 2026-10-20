@@ -47,6 +47,38 @@ def test_wrap_deg_array():
     assert np.array_equal(out, expected)
 
 
+@pytest.mark.parametrize("value", [np.inf, -np.inf, np.nan])
+def test_wrap_deg_non_finite_returns_nan(value):
+    # Requested behaviour: non-finite input gives nan (not an exception).
+    with np.errstate(invalid="ignore"):
+        assert math.isnan(wrap_deg(value))
+
+
+@pytest.mark.parametrize(
+    "angle",
+    [
+        -179.99999999999997,  # previously returned 180.00000000000003
+        np.nextafter(180.0, np.inf),
+        np.nextafter(-180.0, -np.inf),
+        2.0**53 + 180.0,
+        8.29161717e17,  # previously landed outside the range
+        -4.07729686e17,
+        1.7e308,
+        -1.7e308,
+        5e-324,
+    ],
+)
+def test_regression_wrap_deg_range_and_exact_congruence(angle):
+    # Regression (review close-out): the ceil-based formula could leave
+    # (-180, 180] by rounding. Output must be in range and exactly congruent
+    # to the input mod 360 (checked with exact rational arithmetic).
+    from fractions import Fraction
+
+    out = wrap_deg(angle)
+    assert -180.0 < out <= 180.0
+    assert (Fraction(float(angle)) - Fraction(out)) % 360 == 0
+
+
 @pytest.mark.parametrize("estimate, truth, expected", [(-179, 179, 2), (179, -179, -2)])
 def test_signed_circular_error(estimate, truth, expected):
     assert circular_error_deg(estimate, truth) == expected
@@ -78,6 +110,18 @@ def test_regression_large_amplitude_no_overflow(amplitude, true_deg):
     # 1e160 and wrong finite values (45, -135) at 1e152.
     _, x, y = make_signals(F, FS, T, amplitude, true_deg, sigma=0.0)
     est = estimate_phase_difference(x, y, F, FS)
+    assert abs(circular_error_deg(est, true_deg)) <= TOL_DEG
+
+
+@pytest.mark.parametrize("amplitude", [1e306, 1e307, 1.7e308])
+@pytest.mark.parametrize("true_deg", [30.0, -120.0])
+def test_regression_float_limit_amplitude(amplitude, true_deg):
+    # Regression (review close-out reproducer): near the float64 maximum the
+    # projection sums overflowed. 1e306 raised a misleading "undefined" error;
+    # 1e307 and 1.7e308 silently returned nan (the record mean overflowed).
+    _, x, y = make_signals(F, FS, T, amplitude, true_deg, sigma=0.0)
+    with np.errstate(all="raise"):  # any overflow/invalid op fails the test
+        est = estimate_phase_difference(x, y, F, FS)
     assert abs(circular_error_deg(est, true_deg)) <= TOL_DEG
 
 

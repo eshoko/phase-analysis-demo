@@ -45,7 +45,12 @@ DEFAULTS = dict(
 def wrap_deg(angle_deg):
     """Wrap angle(s) in degrees to the interval (-180, 180]."""
     a = np.asarray(angle_deg, dtype=float)
-    wrapped = a - 360.0 * np.ceil((a - 180.0) / 360.0)
+    # fmod is exact, and the +/-360 shifts below are exact (Sterbenz), so the
+    # result is exactly congruent to the input and always in (-180, 180].
+    # Non-finite input gives nan.
+    wrapped = np.fmod(a, 360.0)
+    wrapped = np.where(wrapped > 180.0, wrapped - 360.0, wrapped)
+    wrapped = np.where(wrapped <= -180.0, wrapped + 360.0, wrapped)
     if wrapped.ndim == 0:
         return float(wrapped)
     return wrapped
@@ -155,7 +160,13 @@ def make_signals(frequency, fs, duration, amplitude, phase_diff_deg, sigma, seed
 
 
 def _projection(name, signal, frequency, fs):
-    # Subtract the record mean first. Over an integer number of cycles the
+    # Scale by an exact power of two so the peak is <= 1. Phase does not
+    # depend on scale, and power-of-two scaling is exact, so this changes no
+    # result except to stop the sums below overflowing near the float64 limit.
+    peak = np.max(np.abs(signal))
+    if peak > 0:
+        signal = np.ldexp(signal, -np.frexp(peak)[1])
+    # Subtract the record mean. Over an integer number of cycles the
     # mean contributes nothing to Z in exact arithmetic; removing it keeps a
     # large DC offset from dominating rounding error and the threshold below.
     signal = signal - np.mean(signal)
